@@ -1,0 +1,363 @@
+pragma solidity ^0.4.0;
+
+
+contract Rcoin{
+	address public ICANN="0x8bc4b409826f3a5f38d7d77e8db7489b7aa9def4";
+	address[] public XIR;//地区管理机构,ARNIC,RIPE
+	address[] public ISP;//
+	//address public delagatee;
+	//address public allocator;
+	address public AS;
+
+	struct IPB {
+		uint32 IP_start;//IP前缀
+		uint8 wildnum;//8~24位掩码
+		State state;
+		address owner;
+		address lease;
+	}
+	//mapping(address => IPB[]) public Resource;
+	enum State { Registered, Delegated, Allocated, Revoked }
+	IPB[] public currentIPBs;
+  event Register(
+    bytes IP_start,
+		uint8 wildnum
+    );
+    event Delegate(
+      bytes IP_start,
+      uint8 wildnum,
+      address delegatee
+    );
+    event Allocate(
+        address owner,
+        bytes IP_start,
+        uint8 wildnum,
+        address lease
+    );
+    event Callback(
+            address owner,
+            bytes IP_start,
+            uint8 wildnum,
+            address lease
+    );
+    event Revoke(
+            bytes IP_start,
+            uint8 wildnum,
+            address lease
+    );
+
+	/*modifier require(bool _condition) {
+		if (!_condition) throw;
+		_;
+	}*/
+	modifier onlyICANN() {
+		if (msg.sender != ICANN) throw;
+		_;
+	}
+	modifier onlyISP() {
+		for(uint i=0;i<ISP.length;i++)
+    if (msg.sender == ISP[i]) break;
+    if (i==ISP.length) throw;
+		_;
+	}
+
+
+	function IPBlock_add(//new Registered的IPB入链
+IPB[] _addIPB,uint num, uint bnum//入链位置
+)internal
+	{
+    for(uint j=0;j<num;j++)currentIPBs.push(IPB( _addIPB[j].IP_start,_addIPB[j].wildnum,
+			_addIPB[j].state,_addIPB[j].owner,_addIPB[j].lease ));
+    for (uint i = currentIPBs.length-1; i>bnum+num;i--)
+    {
+      currentIPBs[i].IP_start=currentIPBs[i-num].IP_start;
+      currentIPBs[i].wildnum=currentIPBs[i-num].wildnum;
+      currentIPBs[i].state=currentIPBs[i-num].state;
+      currentIPBs[i].owner=currentIPBs[i-num].owner;
+      currentIPBs[i].lease=currentIPBs[i-num].lease;
+    }
+		for(j=bnum;j<bnum+num;j++)
+		{
+    currentIPBs[j].IP_start=_addIPB[j-bnum].IP_start;
+    currentIPBs[j].wildnum=_addIPB[j-bnum].wildnum;
+    currentIPBs[j].state=_addIPB[j-bnum].state;
+    currentIPBs[j].owner=_addIPB[j-bnum].owner;
+    currentIPBs[j].lease=_addIPB[j-bnum].lease;
+		}
+  }
+
+	function IPBlock_minut(
+uint num, uint bnum
+)internal
+	{
+    for (uint i = bnum+num; i<currentIPBs.length;i++)
+    {
+      currentIPBs[i-num].IP_start=currentIPBs[i].IP_start;
+      currentIPBs[i-num].wildnum=currentIPBs[i].wildnum;
+      currentIPBs[i-num].state=currentIPBs[i].state;
+      currentIPBs[i-num].owner=currentIPBs[i].owner;
+      currentIPBs[i-num].lease=currentIPBs[i].lease;
+    }
+		for(uint j=0;j<num;j++) delete currentIPBs[currentIPBs.length-1];
+  }
+
+
+//2. 考虑末尾为1的情况
+	function IPBlock_next(
+uint32 _startIP, uint8 _wildnum
+)internal returns (uint32 nextIP)
+	{
+		nextIP=_startIP>>(32-_wildnum);
+    nextIP++;//默认此时不会是11111...
+    nextIP=nextIP<<(32-_wildnum);
+      //nextIP=nextIP|_startIP;//默认_startIP是掩码后全为0的合规前缀。
+  }
+
+
+	function IPBlock_Divide(
+uint index,
+uint32 _startIP, uint8	_wildnum
+)internal returns (uint index_d)
+	{
+		if(msg.sender!=currentIPBs[index].owner)throw;
+		if (currentIPBs[index].wildnum>=_wildnum) throw;
+
+		if (currentIPBs[index].IP_start>_startIP)throw;
+		if(currentIPBs[index].IP_start>>(32-currentIPBs[index].wildnum)!=_startIP>>(32-currentIPBs[index].wildnum))throw;
+
+		IPB[] memory addIPB=new IPB[](32);//eg. uint[] memory a = new uint[](7);
+		uint32 divIP=_startIP;
+		uint32 startIP=currentIPBs[index].IP_start;
+		uint8 i=0;
+		index_d=0;
+		while(++i<=_wildnum-currentIPBs[index].wildnum)
+		{
+				if(_startIP>>(32-currentIPBs[index].wildnum+i)&1==0)
+				{
+					addIPB[_wildnum-currentIPBs[index].wildnum-i].IP_start=IPBlock_next(startIP,currentIPBs[index].wildnum+i);
+					addIPB[_wildnum-currentIPBs[index].wildnum-i].wildnum=currentIPBs[index].wildnum+i;
+					addIPB[_wildnum-currentIPBs[index].wildnum-i].state=currentIPBs[index].state;
+					addIPB[_wildnum-currentIPBs[index].wildnum-i].owner=currentIPBs[index].owner;
+					addIPB[_wildnum-currentIPBs[index].wildnum-i].lease=currentIPBs[index].lease;
+				}
+				else
+				{
+					index_d++;
+					addIPB[i-1].IP_start=startIP;
+					addIPB[i-1].wildnum=currentIPBs[index].wildnum+i;
+					addIPB[i-1].state=currentIPBs[index].state;
+					addIPB[i-1].owner=currentIPBs[index].owner;
+					addIPB[i-1].lease=currentIPBs[index].lease;
+					startIP=IPBlock_next(startIP,currentIPBs[index].wildnum+i);
+				}
+		}
+		index_d=index_d+index;
+		IPBlock_add(addIPB,_wildnum-currentIPBs[index].wildnum+1,index );
+	}
+
+
+/*	function IPBlock_Merge(
+IPB[] _seperateIPB
+)internal returns (IPB[] MergeIPB)
+	{
+
+
+
+	}*/
+	function IPBlock_update(uint _updateIPBnum) internal returns (uint index)
+	{
+		index=_updateIPBnum;
+		bool flag1=true;
+		bool flag2=true;
+		while(flag1||flag2)
+		{
+		if(
+			(IPBlock_next(currentIPBs[index-1].IP_start,currentIPBs[index-1].wildnum)==currentIPBs[index].IP_start)
+			&&(currentIPBs[index-1].wildnum==currentIPBs[index].wildnum)
+			&&(currentIPBs[index-1].owner==currentIPBs[index].owner)
+			&&(currentIPBs[index-1].lease==currentIPBs[index].lease)
+			)
+			{
+				currentIPBs[index-1].wildnum--;
+				IPBlock_minut(1,index);
+				index--;
+				flag1=true;
+			}
+			else flag1=false;
+		if(
+				(IPBlock_next(currentIPBs[index].IP_start,currentIPBs[index].wildnum)==currentIPBs[index+1].IP_start)
+				&&(currentIPBs[index].wildnum==currentIPBs[index+1].wildnum)
+				&&(currentIPBs[index].owner==currentIPBs[index+1].owner)
+				&&(currentIPBs[index].lease==currentIPBs[index+1].lease)
+				)
+				{
+					currentIPBs[index].wildnum--;
+					IPBlock_minut(1,index+1);
+					flag2=true;
+				}
+				else flag2=false;
+		}
+
+
+	}
+	function IPBlock_check(uint32 _IP_start,uint8 _wildnum) internal returns (int)  {
+		for (uint i = 0; i < currentIPBs.length; i++)
+		 {
+			if (currentIPBs[i].IP_start>_IP_start)
+				{
+					if (IPBlock_next(currentIPBs[i-1].IP_start,currentIPBs[i-1].wildnum)>
+						_IP_start)
+						{
+						return int (i-1);
+
+					}
+					else if (IPBlock_next(_IP_start,_wildnum)>currentIPBs[i].IP_start)
+							{
+								return -2;//询问的IP块不在同一个现有块内，说明拥有者不同，操作不合法
+							}
+							else
+							{return (-1);//不在链上
+							}
+				}
+		}
+		return (-1);//不在链上
+	}
+	function IPBlock_checkExist(uint32 _IP_start,	uint8 _wildnum)internal returns (int result)  {
+		for (uint i = 0; i < currentIPBs.length; i++) {
+			if (currentIPBs[i].IP_start>_IP_start)
+				{
+					if (i==0)
+					{
+						result=0;
+						return;
+					}
+					else if (IPBlock_next(currentIPBs[i-1].IP_start,currentIPBs[i-1].wildnum)>
+						_IP_start){
+						result=-1;//已存在，不应入链
+						return;
+					}
+					else if (IPBlock_next(_IP_start,_wildnum)>currentIPBs[i].IP_start){
+							result=-1;
+							return;
+						}
+					else
+					{
+						result=int (i);//入链的位置
+						return;
+					}
+				}
+		}
+		result=int (i);
+	}
+
+  function covertIP(bytes IPstring) internal returns (uint32 _IP_start){
+    if (IPstring.length>15) throw;
+    _IP_start=0;
+    uint32 tempIP=0;
+    uint num=0;
+    for(uint length=0;length<IPstring.length;length++){
+      if(IPstring[length]!="."){
+        tempIP=tempIP*uint32(2)+uint32(IPstring[length]);
+      }
+      else{
+        _IP_start=_IP_start*uint32(256)+tempIP;
+        tempIP=0;
+        num++;
+      }
+    }
+    if (num>3) throw;
+    _IP_start=_IP_start*uint32(256**(3-num));
+
+
+  }
+
+	function register(bytes IPstring,	uint8 _wildnum)  {
+    if ((IPstring.length>15)||(_wildnum>24)) throw;
+    uint32 _IP_start=covertIP(IPstring);
+		int num=IPBlock_checkExist( _IP_start, _wildnum);
+		if (num<0)
+		 throw;
+		 uint bnum=uint (num);
+		if(msg.sender!=ICANN) throw;
+		//IPB[] addIPB;
+		//addIPB.push(IPB(_IP_start,_wildnum,State.Registered,ICANN,ICANN));
+		IPB[] memory RegisterIPB=new IPB[](1);//eg. uint[] memory a = new uint[](7);
+		RegisterIPB[0].IP_start=_IP_start;//IP前缀
+		RegisterIPB[0].wildnum=_wildnum;//8~24位掩码
+		RegisterIPB[0].state=State.Registered;
+		RegisterIPB[0].owner=ICANN;
+		RegisterIPB[0].lease=ICANN;
+		IPBlock_add(RegisterIPB,1, bnum);
+    Register(IPstring, _wildnum);
+
+		}
+
+		function delegate(bytes IPstring,	uint8 _wildnum,address delagatee)  {
+      if ((IPstring.length>15)||(_wildnum>24)) throw;
+      uint32 _IP_start=covertIP(IPstring);
+			int num=IPBlock_check(_IP_start, _wildnum);
+			if (num<0)
+			throw;
+			uint bnum=uint (num);
+			if((msg.sender!=currentIPBs[bnum].owner)||(currentIPBs[bnum].state==State.Allocated))
+			throw;
+
+			bnum=IPBlock_Divide(bnum, _IP_start, _wildnum);
+			currentIPBs[bnum].owner=delagatee;
+			currentIPBs[bnum].lease=delagatee;
+			currentIPBs[bnum].state=State.Delegated;
+			IPBlock_update(bnum);
+      Delegate(IPstring, _wildnum, delagatee);
+		}
+
+		function allocate(bytes IPstring,	uint8 _wildnum,address allocatee)  {
+      if ((IPstring.length>15)||(_wildnum>24)) throw;
+      uint32 _IP_start=covertIP(IPstring);
+      int num=IPBlock_check(_IP_start, _wildnum);
+			if (num<0)
+			throw;
+			uint bnum=uint (num);
+			if(msg.sender!=currentIPBs[bnum].owner)
+			throw;
+			bnum=IPBlock_Divide(bnum, _IP_start,	_wildnum);
+			currentIPBs[bnum].lease=allocatee;
+			currentIPBs[bnum].state=State.Allocated;
+			IPBlock_update(bnum);
+      Allocate(msg.sender,IPstring,_wildnum,allocatee);
+		}
+
+		function callback(bytes IPstring,	uint8 _wildnum)  {//3、需要两方签名
+      if ((IPstring.length>15)||(_wildnum>24)) throw;
+      uint32 _IP_start=covertIP(IPstring);
+      int num=IPBlock_check(_IP_start, _wildnum);
+			if (num<0)
+			throw;
+			uint bnum=uint (num);
+			if(msg.sender!=currentIPBs[bnum].owner)
+			throw;
+			bnum=IPBlock_Divide(bnum, _IP_start,	_wildnum);
+      Callback(msg.sender,IPstring, _wildnum,currentIPBs[bnum].lease);
+			currentIPBs[bnum].lease=currentIPBs[bnum].owner;
+			currentIPBs[bnum].state=State.Delegated;
+			IPBlock_update(bnum);
+
+		}
+		function revoke(bytes IPstring,	uint8 _wildnum)  {
+      if ((IPstring.length>15)||(_wildnum>24)) throw;
+      uint32 _IP_start=covertIP(IPstring);
+			int num=IPBlock_check(_IP_start, _wildnum);
+			if (num<0)
+			throw;
+			uint bnum=uint (num);
+			if(msg.sender!=ICANN)
+			throw;
+			currentIPBs[bnum].owner=ICANN;
+      Revoke(IPstring,_wildnum,currentIPBs[bnum].lease);
+			currentIPBs[bnum].lease=ICANN;
+			currentIPBs[bnum].state=State.Revoked;
+			IPBlock_update(bnum);
+
+		}
+
+}
+
